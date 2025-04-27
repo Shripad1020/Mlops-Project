@@ -1,0 +1,91 @@
+name: Deploy to GCP Cloud Run
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-deploy:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v2
+
+      - name: Auth with Google Cloud
+        id: auth
+        uses: 'google-github-actions/auth@v1'
+        with:
+          credentials_json: '${{ secrets.GCP_SERVICE_KEY }}'
+
+      - name: Set up Google Cloud SDK
+        uses: 'google-github-actions/setup-gcloud@v1'
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Verify Authentication Status
+        run: |
+          echo "Checking active account..."
+          gcloud auth list --filter=status:ACTIVE --format="value(account)"
+          echo "Checking project..."
+          gcloud config get-value project
+
+      - name: Check if repository exists or create it
+        run: |
+          echo "Checking if repository exists..."
+          REPO_EXISTS=$(gcloud artifacts repositories list --location=${{ secrets.GCP_REGION }} --format="value(name)" | grep -c "diabetes-docker-repo" || true)
+          
+          if [ "$REPO_EXISTS" -eq "0" ]; then
+            echo "Repository doesn't exist. Creating it now..."
+            gcloud artifacts repositories create diabetes-docker-repo \
+              --repository-format=docker \
+              --location=${{ secrets.GCP_REGION }} \
+              --description="Docker repository for diabetes app"
+          else
+            echo "Repository already exists"
+          fi
+
+      - name: Configure Docker for GCP
+        run: |
+          echo "Configuring Docker authentication for Artifact Registry..."
+          gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev --quiet
+
+      - name: Check Docker Configuration
+        run: |
+          echo "Checking Docker configuration files..."
+          if [ -f ~/.docker/config.json ]; then
+            cat ~/.docker/config.json | grep -v "auth" | grep -v "password"
+          else
+            echo "Docker config file not found"
+          fi
+
+      - name: Build Docker Image
+        run: |
+          echo "Building Docker image..."
+          docker build --no-cache -t ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID}}/diabetes-docker-repo/diabetes-app:latest .
+          
+          echo "Verifying image was built..."
+          docker images
+
+      - name: Push to Artifact Registry
+        run: |
+          echo "Pushing image to Artifact Registry..."
+          docker push ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/diabetes-docker-repo/diabetes-app:latest
+
+      - name: Check Push Results
+        run: |
+          echo "Checking for image in repository..."
+          gcloud artifacts docker images list ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/diabetes-docker-repo/diabetes-app \
+            --include-tags \
+            --limit=5
+
+      - name: Deploy to Cloud Run
+        run: |
+          echo "Deploying to Cloud Run..."
+          gcloud run deploy diabetes-app \
+            --image=${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/diabetes-docker-repo/diabetes-app:latest \
+            --platform=managed \
+            --region=${{ secrets.GCP_REGION }} \
+            --allow-unauthenticated \
+            
